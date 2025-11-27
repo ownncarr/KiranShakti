@@ -168,17 +168,3 @@ These are converted to pixel radii dynamically based on latitude and zoom using 
 Contributions are welcome! Please follow PEP8, keep commits descriptive, and ensure reproducibility.
 
 ---
-
-## 📜 License
-
-This project is for **research and educational purposes**.
-Imagery fetched via Google APIs is subject to **Google’s Terms of Service**. Redistribution of imagery is not permitted.
-
----
-
-## 👤 Author
-
-**Onkar Belure**
-AI & Computer Vision Enthusiast
-📧 [your-email@example.com](mailto:your-email@example.com)
-🌐 Project: Rooftop Solar P
