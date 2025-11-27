@@ -13,7 +13,8 @@ python-dotenv>=1.0.1
 
 # Machine Learning (choose your framework)
 torch>=2.2.0          # for PyTorch-based model
-# tensorflow>=2.15.0  # uncomment if using TensorFlow instead
+tensorflow>=2.15.0  # uncomment if using TensorFlow instead
+keras>=2.15.0      # uncomment if using Keras instead
 
 # Utilities
 tqdm>=4.66.1
