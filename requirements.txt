@@ -1,0 +1,24 @@
+# Core
+pandas>=2.2.0
+numpy>=1.26.0
+openpyxl>=3.1.0
+
+# Image handling
+Pillow>=10.0.0
+opencv-python>=4.9.0.80
+
+# HTTP & API calls
+requests>=2.31.0
+python-dotenv>=1.0.1
+
+# Machine Learning (choose your framework)
+torch>=2.2.0          # for PyTorch-based model
+# tensorflow>=2.15.0  # uncomment if using TensorFlow instead
+
+# Utilities
+tqdm>=4.66.1
+matplotlib>=3.8.2
+scikit-learn>=1.4.0
+
+# Optional: geographic helpers (if you add map-based distance/buffer later)
+geopy>=2.4.1
