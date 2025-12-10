@@ -1,25 +1,31 @@
-# Core
-pandas>=2.2.0
-numpy>=1.26.0
+# UI
+streamlit>=1.30.0
+streamlit-option-menu>=0.3.6
+
+# Encryption
+cryptography>=41.0.0
+
+# Core ML / Model inference
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Image processing
+Pillow>=10.0.0
+numpy>=1.24.0
+scikit-image>=0.22.0
+
+# Geospatial / polygons
+shapely>=2.0.0
+
+# Data handling
+pandas>=2.0.0
 openpyxl>=3.1.0
 
-# Image handling
-Pillow>=10.0.0
-opencv-python>=4.9.0.80
+torch==2.2.0+cpu
+torchvision==0.17.0+cpu
 
-# HTTP & API calls
+# Networking
 requests>=2.31.0
-python-dotenv>=1.0.1
 
-# Machine Learning (choose your framework)
-torch>=2.2.0          # for PyTorch-based model
-tensorflow>=2.15.0  # uncomment if using TensorFlow instead
-keras>=2.15.0      # uncomment if using Keras instead
-
-# Utilities
-tqdm>=4.66.1
-matplotlib>=3.8.2
-scikit-learn>=1.4.0
-
-# Optional: geographic helpers (if you add map-based distance/buffer later)
-geopy>=2.4.1
+# Environment (optional but useful)
+python-dotenv>=1.0.0

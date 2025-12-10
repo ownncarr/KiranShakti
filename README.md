@@ -56,7 +56,7 @@ Input Coordinates (.xlsx)
 
 ```bash
 git clone https://github.com/<your-repo-name>.git
-cd rooftop-pv-detection
+cd root-dir
 
 python -m venv .venv
 source .venv/bin/activate  # or .venv\Scripts\activate on Windows
@@ -140,6 +140,31 @@ Restrict your key to your IP or domain for security.
 ├── requirements.txt
 └── README.md
 ```
+---
+
+## 🐳 Docker — run locally with CPU or GPU
+
+This project includes a **universal Dockerfile** that can be used to build either a **CPU image** (default) or a **GPU image** (by selecting a PyTorch CUDA base at build time).
+
+The app automatically detects the available device.  
+If the container has **CUDA-enabled PyTorch** and the host provides **GPU access** (`--gpus all`), the app will run on **GPU** — otherwise, it will fall back to **CPU**.
+
+---
+
+### ⚙️ Build & Run (CPU/GPU)
+
+Build the CPU image (default base `python:3.11-slim`):
+
+```bash
+
+docker build -t pv-console:cpu .
+
+Build the GPU image:
+
+docker build \
+  --build-arg BASE_IMAGE=pytorch/pytorch:2.2.0-cuda11.8-cudnn8-runtime \
+  -t pv-console:gpu .
+
 
 ---
 

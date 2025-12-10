@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 preprocessing/
 *yolo/
+*dataset/
+*pv-DatasetNinja/
