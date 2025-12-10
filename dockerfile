@@ -1,7 +1,7 @@
+# Dockerfile (universal: cpu or gpu depending on build args)
 ARG BASE_IMAGE=python:3.11-slim
 FROM ${BASE_IMAGE} as base
 
-# metadata
 LABEL maintainer="you@example.com"
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
@@ -10,6 +10,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Install system dependencies required for Pillow / shapely / scikit-image / ffmpeg etc.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        build-essential \
@@ -29,17 +30,40 @@ RUN apt-get update \
        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# Copy project files early (allows caching)
 COPY . /app
 
+# Use bash for the following multi-step install
 SHELL ["/bin/bash", "-c"]
 
-RUN python -m pip install --upgrade pip setuptools wheel \
- && python -c "import importlib, sys\ntry:\n import torch\n print('torch already present; skipping torch install')\nexcept Exception:\n print('torch not found')\n sys.exit(0 if ('torch' in __import__('sys').argv) else 0)" || true
+# Upgrade pip and wheel
+RUN python -m pip install --upgrade pip setuptools wheel
 
-RUN python - <<'PY'\nimport importlib, subprocess, sys\ntry:\n    import torch\n    print('torch detected; skipping torch pip install')\nexcept Exception:\n    print('Installing CPU torch + torchvision (best-effort).')\n    try:\n        subprocess.check_call([\n            sys.executable, '-m', 'pip', 'install', '--no-cache-dir',\n            '--index-url', 'https://download.pytorch.org/whl/cpu', 'torch', 'torchvision'\n        ])\n    except Exception:\n        # fallback to pip (may install cpu wheel from PyPI)\n        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', 'torch', 'torchvision'])\nPY
+# Install torch only if not present in the base image.
+# Try CPU wheels from the official PyTorch CPU index, fall back to PyPI.
+RUN python - <<'PY'
+import importlib, subprocess, sys
+try:
+    import torch  # type: ignore
+    print("torch detected in base image; skipping torch install")
+except Exception:
+    print("torch not found; installing CPU torch + torchvision (best-effort)")
+    try:
+        subprocess.check_call([
+            sys.executable, '-m', 'pip', 'install', '--no-cache-dir',
+            '--index-url', 'https://download.pytorch.org/whl/cpu', 'torch', 'torchvision'
+        ])
+    except Exception:
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--no-cache-dir', 'torch', 'torchvision'])
+PY
 
-RUN if [ -f requirements.txt ]; then \\\n  grep -vE \"^\\s*(torch|torchvision)\\b\" requirements.txt > /tmp/reqs_no_torch.txt || true; \\\n  python -m pip install --no-cache-dir -r /tmp/reqs_no_torch.txt; \\\nfi
+# Install the rest of requirements but skip torch and torchvision lines (avoids double install)
+RUN if [ -f requirements.txt ]; then \
+      grep -vE "^\s*(torch|torchvision)\b" requirements.txt > /tmp/reqs_no_torch.txt || true; \
+      python -m pip install --no-cache-dir -r /tmp/reqs_no_torch.txt; \
+    fi
 
+# Create a non-root user and fix permissions
 RUN useradd --create-home --shell /bin/bash appuser || true \
  && mkdir -p /app && chown -R appuser:appuser /app
 
