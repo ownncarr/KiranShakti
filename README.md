@@ -171,6 +171,8 @@ docker build \
 
 ---
 
+---
+
 ## 🧮 Buffer Zones (Real-World Scale)
 
 | Buffer | Area (sq.ft) | Area (m²) | Approx Radius (m) |
