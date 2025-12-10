@@ -74,4 +74,4 @@ EXPOSE ${STREAMLIT_SERVER_PORT}
 
 ENV STREAMLIT_SERVER_HEADLESS=true
 
-ENTRYPOINT ["streamlit", "run", "streamlit_app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+ENTRYPOINT ["streamlit", "run", "pipeline/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
