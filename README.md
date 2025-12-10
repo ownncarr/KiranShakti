@@ -159,12 +159,15 @@ Build the CPU image (default base `python:3.11-slim`):
 
 docker build -t pv-console:cpu .
 
+```
+
 Build the GPU image:
+
+```bash 
 
 docker build \
   --build-arg BASE_IMAGE=pytorch/pytorch:2.2.0-cuda11.8-cudnn8-runtime \
   -t pv-console:gpu .
-
 
 ---
 
