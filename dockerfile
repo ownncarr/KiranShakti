@@ -1,6 +1,6 @@
 # Dockerfile (universal: cpu or gpu depending on build args)
 ARG BASE_IMAGE=python:3.11-slim
-FROM ${BASE_IMAGE} as base
+FROM ${BASE_IMAGE} AS base
 
 LABEL maintainer="you@example.com"
 ENV PYTHONUNBUFFERED=1 \
