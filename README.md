@@ -169,8 +169,7 @@ docker build \
   --build-arg BASE_IMAGE=pytorch/pytorch:2.2.0-cuda11.8-cudnn8-runtime \
   -t pv-console:gpu .
 
----
-
+```
 ---
 
 ## 🧮 Buffer Zones (Real-World Scale)
