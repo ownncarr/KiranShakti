@@ -1,6 +1,6 @@
 # Dockerfile (universal: cpu or gpu depending on build args)
 ARG BASE_IMAGE=python:3.11-slim
-FROM ${BASE_IMAGE} as base
+FROM ${BASE_IMAGE} AS base
 
 LABEL maintainer="you@example.com"
 ENV PYTHONUNBUFFERED=1 \
@@ -74,4 +74,8 @@ EXPOSE ${STREAMLIT_SERVER_PORT}
 
 ENV STREAMLIT_SERVER_HEADLESS=true
 
-ENTRYPOINT ["streamlit", "run", "streamlit_app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+<<<<<<< HEAD
+ENTRYPOINT ["streamlit", "run", "pv_console/streamlit_app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+=======
+ENTRYPOINT ["streamlit", "run", "pipeline/app.py", "--server.port", "8501", "--server.address", "0.0.0.0"]
+>>>>>>> 68f0b1a0fede59724428c1d30176c724d5d75fc5
