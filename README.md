@@ -114,34 +114,6 @@ Restrict your key to your IP or domain for security.
 
 ---
 
-## 📁 Repository Structure
-
-```text
-.
-├── pipeline/
-│   ├── main_inference.py        # main entry point
-│   ├── fetch_image.py           # API image fetching logic
-│   ├── model_inference.py       # ML model inference
-│   ├── postprocess.py           # area & confidence estimation
-│   └── utils/                   # helper functions
-│
-├── models/
-│   └── solar_detector.pt        # trained model weights
-│
-├── artefacts/
-│   └── overlays/                # verification images
-│
-├── data/
-│   └── coordinates.xlsx         # input data
-│
-├── results/
-│   └── predictions.json         # output results
-│
-├── requirements.txt
-└── README.md
-```
----
-
 ## 🐳 Docker — run locally with CPU or GPU
 
 This project includes a **universal Dockerfile** that can be used to build either a **CPU image** (default) or a **GPU image** (by selecting a PyTorch CUDA base at build time).
@@ -180,15 +152,6 @@ docker build \
 | Outer  |         2400 |     223.0 |          ≈ 8.43 m |
 
 These are converted to pixel radii dynamically based on latitude and zoom using the Web Mercator projection.
-
----
-
-## 🌱 Future Work
-
-* Integrate **Google Earth Engine** for time-series and change detection.
-* Add **multi-spectral analysis** for improved accuracy.
-* Build a **REST API** or web dashboard for real-time inference.
-* Automate retraining using feedback loops.
 
 ---
 
