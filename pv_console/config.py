@@ -9,7 +9,7 @@ KEY_FILE = os.path.join(CONFIG_DIR, "key.bin")
 API_FILE = os.path.join(CONFIG_DIR, "api.enc")
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_RELATIVE_PATH = os.path.abspath(os.path.join(APP_DIR, "..", "models", "best_model.pth"))
+MODEL_RELATIVE_PATH = os.path.abspath(os.path.join(APP_DIR, "..", "models", "pv_detector.pt"))
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(os.path.join(APP_DIR, "..", "models"), exist_ok=True)
 

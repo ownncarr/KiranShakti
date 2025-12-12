@@ -316,8 +316,8 @@ if CRYPTO_OK:
 # fetch_satellite_image (pipeline/fetch_image.py)
 def fetch_satellite_image(lat: float, lon: float, api_key: str, zoom: int = 20, size_px: int = 640) -> Image.Image:
     """
-    Fetch a top-down satellite image centered at (lat, lon) using Google Static Maps.
-    If requests or network fails, return a placeholder image.
+    Fetch satellite image from Google Static Maps API.
+    Always returns RGB image (canonical channel order) for preprocessing consistency.
     """
     if not api_key:
         return _placeholder_overlay((size_px, size_px), "no api key")
@@ -335,7 +335,8 @@ def fetch_satellite_image(lat: float, lon: float, api_key: str, zoom: int = 20, 
         }
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
-        return Image.open(io.BytesIO(resp.content)).convert("RGB")
+        img = Image.open(io.BytesIO(resp.content))
+        return img.convert("RGB")  # Explicit RGB conversion for reproducibility
     except Exception:
         return _placeholder_overlay((size_px, size_px), "fetch failed")
 
@@ -349,22 +350,41 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Model path relative to this file (one deterministic location)
 MODEL_PATH = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "models", "best_model.pth")
+    os.path.join(os.path.dirname(__file__), "..", "models", "pv_detector.pt")
 )
 
 # Create models dir (no harm)
 os.makedirs(os.path.join(APP_DIR, "..", "models"), exist_ok=True)
 
-# Model input size and helper
-MODEL_INPUT_SIZE = (512, 512)  # (width, height) expected by the model
-TEMPERATURE = 1.5  # calibration scale
+# -------------------------
+# PREPROCESSING CONSTANTS & METADATA (must match training exactly)
+# -------------------------
+MODEL_INPUT_SIZE = (512, 512)  # (width, height) — exact model input dimensions
+TEMPERATURE = 1.5  # calibration scale for sigmoid
+INTERPOLATION = Image.LANCZOS  # Lanczos for high-quality resize (matches training)
+PAD_VALUE = (28, 28, 30)  # RGB padding color
 
-# Preprocess: DO NOT resize here (we handle resizing with letterbox)
+# ImageNet normalization (standard; match training exactly)
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+# Preprocessing metadata for reproducibility & validation
+PREPROCESS_METADATA = {
+    "version": "1.0",
+    "img_size": MODEL_INPUT_SIZE,
+    "pad_value": PAD_VALUE,
+    "mean": IMAGENET_MEAN,
+    "std": IMAGENET_STD,
+    "interpolation": "LANCZOS",
+    "channel_order": "RGB",
+    "tensor_layout": "CHW",
+    "description": "Letterbox resize (aspect-ratio preserving) + pad + normalize(ImageNet)"
+}
+
 if TORCH_OK:
     preprocess = T.Compose([
-        T.ToTensor(),
-        T.Normalize(mean=[0.485, 0.456, 0.406],
-                    std=[0.229, 0.224, 0.225])
+        T.ToTensor(),  # uint8 [0,255] → float32 [0,1], reorder to CHW
+        T.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
     ])
 else:
     preprocess = None
@@ -380,6 +400,11 @@ _MODEL = None
 _MODEL_DEVICE = None
 
 def load_model():
+    """
+    Robust loader with allowlist for segmentation_models_pytorch.UnetPlusPlus
+    (Option A). Attempts safe object unpickling using torch.serialization.add_safe_globals
+    when available and falls back gracefully to older torch behavior.
+    """
     import traceback
 
     global _MODEL, _MODEL_DEVICE
@@ -400,10 +425,51 @@ def load_model():
     _MODEL_DEVICE = device
 
     try:
-        # ✅ Load directly as a model object (works for .pt files saved via torch.save(model, path))
-        model = torch.load(MODEL_PATH, map_location=device)
+        # Build an allowlist for safe unpickling if smp is present
+        allowlist = []
+        if SMP_OK:
+            try:
+                import segmentation_models_pytorch as smp  # may raise if SMP not actually importable
+                # The exact class referenced in the error message:
+                UnetPP = smp.decoders.unetplusplus.model.UnetPlusPlus
+                allowlist.append(UnetPP)
+            except Exception:
+                # if we can't import or access the class, continue without allowlist
+                allowlist = []
 
-        # If it's already a torch.nn.Module, we’re good
+        # Try to use torch.serialization.add_safe_globals when available.
+        # Also try to use weights_only=False (PyTorch >=2.6); handle older torch versions.
+        model = None
+        ser = getattr(torch, "serialization", None)
+        add_safe = getattr(ser, "add_safe_globals", None) if ser is not None else None
+
+        # Primary attempt: with add_safe_globals (if available) and weights_only=False
+        try:
+            if add_safe is not None and allowlist:
+                with add_safe(allowlist):
+                    # weights_only=False allows object unpickling for allowlisted globals.
+                    model = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+            else:
+                # If we don't have an allowlist, still attempt to load with weights_only=False;
+                # this can raise on newer PyTorch if globals aren't allowed.
+                model = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+        except TypeError:
+            # torch.load doesn't accept weights_only parameter (older torch) — retry without it
+            try:
+                # Skip add_safe if unavailable; just load normally
+                model = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+            except TypeError:
+                # Older torch: weights_only not supported, remove it
+                model = torch.load(MODEL_PATH, map_location=device)
+            except Exception:
+                # Propagate to outer handler
+                raise
+        except Exception:
+            # If the above failed (e.g. due to allowlist missing/unsafe), attempt a safer path below
+            # and let outer except handle it if it ultimately fails.
+            raise
+
+        # If loaded object is an actual nn.Module — use it directly
         if isinstance(model, torch.nn.Module):
             model.to(device)
             model.eval()
@@ -411,8 +477,8 @@ def load_model():
             print(f"Loaded full model object from {MODEL_PATH}")
             return _MODEL
 
-        # Otherwise, maybe someone accidentally saved a dict-like state
-        elif isinstance(model, dict):
+        # If we got a dict-like checkpoint (weights/state_dict) — reconstruct UNet++
+        if isinstance(model, dict):
             print("Model file contains state_dict-style checkpoint; reconstructing UNet++...")
             if not SMP_OK:
                 print("segmentation_models_pytorch not available; cannot rebuild UNet++.")
@@ -421,23 +487,30 @@ def load_model():
             import segmentation_models_pytorch as smp
             m = smp.UnetPlusPlus(
                 encoder_name="efficientnet-b3",
-                encoder_weights=None,  # not needed during load
+                encoder_weights=None,
                 in_channels=3,
                 classes=1,
                 activation=None
             )
+            # Support both {'model_state': state_dict} and raw state_dict
             state = model.get("model_state", model)
-            m.load_state_dict(state)
+            try:
+                m.load_state_dict(state)
+            except Exception as e:
+                print("Failed to load state_dict into reconstructed UnetPlusPlus:", e)
+                traceback.print_exc()
+                _MODEL = None
+                return None
             m.to(device)
             m.eval()
             _MODEL = m
             print("Reconstructed model from state_dict successfully.")
             return _MODEL
 
-        else:
-            print(f"Unknown object type loaded from {MODEL_PATH}: {type(model)}")
-            _MODEL = None
-            return None
+        # Unknown object type
+        print(f"Unknown object type loaded from {MODEL_PATH}: {type(model)}")
+        _MODEL = None
+        return None
 
     except Exception as e:
         print(f"Failed to load model from {MODEL_PATH}: {e}")
@@ -446,59 +519,135 @@ def load_model():
         return None
 
 
+
 # -------------------------
-# Resize & pad helper + preprocess (preserve aspect ratio)
-def resize_and_pad(pil_img: Image.Image, target_size=MODEL_INPUT_SIZE, fill_color=(28,28,30)):
+# CANONICAL PREPROCESSING PIPELINE
+# Order: decode → RGB → EXIF rotate → letterbox → pad → normalize
+# -------------------------
+def _handle_exif_rotation(pil_img: Image.Image) -> Image.Image:
+    """Apply EXIF rotation for reproducibility across camera sources."""
+    try:
+        from PIL import ExifTags
+        exif = pil_img._getexif() if hasattr(pil_img, '_getexif') else None
+        if exif is None:
+            return pil_img
+        exif_dict = {ExifTags.TAGS[k]: v for k, v in exif.items() if k in ExifTags.TAGS}
+        orientation = exif_dict.get('Orientation', 1)
+        rotations = {3: 180, 6: 270, 8: 90}
+        if orientation in rotations:
+            return pil_img.rotate(rotations[orientation], expand=True)
+    except Exception:
+        pass
+    return pil_img
+
+def resize_and_pad(pil_img: Image.Image, target_size=MODEL_INPUT_SIZE, fill_color=None):
     """
-    Resize image preserving aspect ratio and pad to target_size (width, height).
-    Returns (padded_image, meta) where meta has orig_size, resized_size, paste offsets and scale.
+    Canonical preprocessing: aspect-ratio preserving resize + centerpad.
+    
+    Pipeline:
+      1. RGB conversion (drop alpha, convert grayscale)
+      2. EXIF rotation (camera orientation)
+      3. Scale: longer side → target size (maintain aspect)
+      4. Pad to exact target_size
+    
+    Returns:
+        (padded_img, metadata) — metadata for prediction denormalization
     """
+    if fill_color is None:
+        fill_color = PAD_VALUE
+    
+    # Step 1: Ensure RGB (handles RGBA, grayscale, etc.)
+    if pil_img.mode == "RGBA":
+        bg = Image.new("RGB", pil_img.size, fill_color)
+        bg.paste(pil_img, mask=pil_img.split()[3])
+        pil_img = bg
+    elif pil_img.mode != "RGB":
+        pil_img = pil_img.convert("RGB")
+    
+    # Step 2: EXIF rotation
+    pil_img = _handle_exif_rotation(pil_img)
+    
+    # Step 3: Aspect-ratio preserving scale + pad
     target_w, target_h = target_size
     src_w, src_h = pil_img.size
-
-    # preserve aspect ratio
     scale = min(target_w / src_w, target_h / src_h)
     new_w = max(1, int(round(src_w * scale)))
     new_h = max(1, int(round(src_h * scale)))
-    resized = pil_img.resize((new_w, new_h), resample=Image.LANCZOS)
-
-    # create background and paste centered
-    new_img = Image.new("RGB", (target_w, target_h), fill_color)
+    resized = pil_img.resize((new_w, new_h), resample=INTERPOLATION)
+    
+    # Step 4: Pad centered to exact target size
+    padded = Image.new("RGB", (target_w, target_h), fill_color)
     paste_x = (target_w - new_w) // 2
     paste_y = (target_h - new_h) // 2
-    new_img.paste(resized, (paste_x, paste_y))
-
-    meta = {"orig_size": (src_w, src_h), "resized_size": (new_w, new_h), "paste": (paste_x, paste_y), "scale": scale}
-    return new_img, meta
+    padded.paste(resized, (paste_x, paste_y))
+    
+    meta = {
+        "orig_size": (src_w, src_h),
+        "resized_size": (new_w, new_h),
+        "paste": (paste_x, paste_y),
+        "scale": scale,
+        "pad_value": fill_color,
+        "preprocess_version": PREPROCESS_METADATA["version"]
+    }
+    return padded, meta
 
 # -------------------------
 def predict(model, pil_image: Image.Image, device: Optional[Any] = None):
     """
-    Run model and return mask (PIL L) and confidence float.
-    Preserves aspect ratio (letterbox) and resizes mask back to original size.
+    Inference with canonical preprocessing (training-inference parity).
+    
+    Pipeline (matching training exactly):
+      1. Preprocess: RGB convert → EXIF rotate → letterbox → pad
+      2. Normalize: uint8 [0,255] → float32 [0,1] → ImageNet normalized
+      3. Infer: logits → sigmoid(logits / TEMPERATURE)
+      4. Denormalize: mask → original image coordinates
+    
+    Returns:
+        (mask_resized, confidence): mask (PIL L uint8 [0,255]), confidence (float [0,1])
     """
     if model is None or not TORCH_OK:
         w, h = pil_image.size
         return Image.new("L", (w, h), 0), 0.0
     try:
         device = device or _MODEL_DEVICE or get_default_device()
-        # ensure RGB
-        pil_in = pil_image.convert("RGB")
-        # letterbox to model input
-        pil_letterboxed, meta = resize_and_pad(pil_in, MODEL_INPUT_SIZE)
-        # preprocess
-        img_tensor = preprocess(pil_letterboxed).unsqueeze(0).to(device)
+        
+        # PREPROCESS: RGB + EXIF + letterbox + pad (uses PREPROCESS_METADATA)
+        pil_preprocessed, meta = resize_and_pad(pil_image, MODEL_INPUT_SIZE)
+        
+        # NORMALIZE: uint8 [0,255] → float32 [0,1] (ToTensor) → ImageNet normalized
+        # Order: ToTensor (uint8→float [0,1], HWC→CHW) then Normalize (subtract mean, divide std)
+        img_tensor = preprocess(pil_preprocessed).unsqueeze(0).to(device)
+        
+        # INFERENCE: logits → probabilities via sigmoid
         with torch.no_grad():
             logits = model(img_tensor)
             if isinstance(logits, (list, tuple)):
                 logits = logits[0]
             prob_map = torch.sigmoid(logits / TEMPERATURE)[0, 0].detach().cpu().numpy()
-        mask = (prob_map > 0.5).astype(np.uint8) * 255
+        
+        # BINARIZE at 0.5 threshold to create binary mask
+        mask_bool = (prob_map > 0.5)
+        mask = (mask_bool.astype(np.uint8) * 255)
         mask_img_512 = Image.fromarray(mask.astype(np.uint8))
-        # resize mask back to original image size using NEAREST
+
+        # DENORMALIZE: resize mask from preprocessed coords back to original image size
         orig_w, orig_h = meta["orig_size"]
         mask_resized = mask_img_512.resize((orig_w, orig_h), resample=Image.NEAREST)
-        confidence = float(prob_map.mean())
+
+        # CONFIDENCE: prefer statistics inside predicted mask when available
+        try:
+            if mask_bool.sum() > 0:
+                mask_probs = prob_map[mask_bool]
+                mean_in_mask = float(mask_probs.mean())
+                p95_in_mask = float(np.percentile(mask_probs, 95))
+                # Combine mean and high-percentile to be robust and reflect strong peaks
+                confidence = float(0.6 * mean_in_mask + 0.4 * p95_in_mask)
+            else:
+                # No mask: fall back to 95th percentile of global prob map
+                confidence = float(np.percentile(prob_map, 95))
+        except Exception:
+            # Last fallback: global mean
+            confidence = float(np.mean(prob_map))
         return mask_resized, confidence
     except Exception:
         traceback.print_exc()
@@ -587,7 +736,7 @@ def compute_overlap_area(pv_mask_arr: np.ndarray, buffer_mask: np.ndarray, gsd_m
         return 0.0
 
 # overlay helpers (adapted from backend)
-def _make_overlay(image: Image.Image, mask_img: Image.Image, r1200_px: int, r2400_px: int, confidence: float) -> Image.Image:
+def _make_overlay(image: Image.Image, mask_img: Image.Image, r1200_px: int, r2400_px: int, confidence: float, show_1200: bool = True, show_2400: bool = True) -> Image.Image:
     base = image.convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
@@ -605,14 +754,41 @@ def _make_overlay(image: Image.Image, mask_img: Image.Image, r1200_px: int, r240
                 mask_alpha = mask_alpha.convert("L")
             red.putalpha(mask_alpha)
             overlay = Image.alpha_composite(overlay, red)
+            # Recreate drawing context on the composited overlay so subsequent
+            # shapes are drawn onto the actual overlay image (Image.alpha_composite
+            # returns a new Image object).
+            draw = ImageDraw.Draw(overlay)
+
+            # Draw bounding boxes around detected regions
+            try:
+                from scipy import ndimage
+                labeled, num_features = ndimage.label(mask_arr == 255)
+                for i in range(1, num_features + 1):
+                    region = (labeled == i)
+                    y_coords, x_coords = np.where(region)
+                    if len(y_coords) > 0 and len(x_coords) > 0:
+                        x_min, x_max = int(x_coords.min()), int(x_coords.max())
+                        y_min, y_max = int(y_coords.min()), int(y_coords.max())
+                        # Draw only a cyan outline box (no fill)
+                        outline_color = (0, 255, 255, 255)
+                        try:
+                            draw.rectangle([x_min, y_min, x_max, y_max], outline=outline_color, width=2)
+                        except Exception:
+                            # Pillow fallback - try without width
+                            draw.rectangle([x_min, y_min, x_max, y_max], outline=outline_color)
+            except Exception:
+                pass
     except Exception:
         mask_has_data = False
 
     try:
         box1200 = [center[0] - r1200_px, center[1] - r1200_px, center[0] + r1200_px, center[1] + r1200_px]
         box2400 = [center[0] - r2400_px, center[1] - r2400_px, center[0] + r2400_px, center[1] + r2400_px]
-        draw.ellipse(box2400, outline=(255, 200, 40, 220), width=3)
-        draw.ellipse(box1200, outline=(120, 220, 130, 240), width=4)
+        # Draw only the selected circle(s)
+        if show_2400:
+            draw.ellipse(box2400, outline=(255, 200, 40, 220), width=3)
+        if show_1200:
+            draw.ellipse(box1200, outline=(120, 220, 130, 240), width=4)
     except Exception:
         pass
 
@@ -735,16 +911,92 @@ def process_sample(row, mode: str = "Smart Review", api_key: Optional[str] = Non
         area_1200 = compute_overlap_area(pv_arr, buf1200, gsd)
         area_2400 = compute_overlap_area(pv_arr, buf2400, gsd)
 
+        # Decide which buffer to use for reporting and visualization.
         if area_1200 > 1.0:
+            # PV detected within 1200 sqft circle — focus prediction there
+            used_buf = buf1200
+            show_1200, show_2400 = True, False
             has_solar = True
             pv_area_m2 = area_1200
             buffer_used_sqft = 1200
-        else:
-            has_solar = area_2400 > 1.0
+        elif area_2400 > 1.0:
+            # No PV in 1200, but present in 2400 — focus prediction in 2400 circle
+            used_buf = buf2400
+            show_1200, show_2400 = False, True
+            has_solar = True
             pv_area_m2 = area_2400
             buffer_used_sqft = 2400
+        else:
+            # No PV found in either; default to 1200 circle for visualization
+            used_buf = buf1200
+            show_1200, show_2400 = True, False
+            has_solar = False
+            pv_area_m2 = area_1200
+            buffer_used_sqft = 1200
 
-        polygon_b64 = encode_mask_as_polygon(mask_img)
+        # Mask the predicted mask so overlay and polygon reflect only the chosen buffer
+        try:
+            masked_arr = ((pv_arr == 255) & (used_buf == 1)).astype(np.uint8) * 255
+            masked_mask_img = Image.fromarray(masked_arr.astype(np.uint8))
+        except Exception:
+            masked_mask_img = mask_img
+
+        polygon_b64 = encode_mask_as_polygon(masked_mask_img)
+
+        # If the model predicts PV outside the 2400 sqft buffer, include an annulus just outside
+        # the circle and merge any predicted pixels within that annulus into a single combined mask.
+        try:
+            outside_px = ((pv_arr == 255) & (buf2400 == 0)).sum()
+            if outside_px > 0:
+                # Expand search area by a margin (half the 2400 radius or at least 60px),
+                # and limit to image bounds.
+                margin_px = max(int(r2400 * 0.5), 60)
+                extended_radius = r2400 + margin_px
+                # create ring buffer = extended radius minus original 2400 radius
+                extended_buf = create_circular_buffer((H, W), extended_radius)
+                ring_buf = ((extended_buf == 1) & (buf2400 == 0)).astype(np.uint8)
+                # Check whether predicted PV exists inside that ring
+                ring_px = ((pv_arr == 255) & (ring_buf == 1)).sum()
+                if ring_px > 0:
+                    # Merge predicted pixels inside 2400 and ring into final mask
+                    combined_arr = ((pv_arr == 255) & ((buf2400 == 1) | (ring_buf == 1))).astype(np.uint8) * 255
+                    masked_mask_img = Image.fromarray(combined_arr.astype(np.uint8))
+                    # Recompute area: area_in_2400 + area_in_ring
+                    area_in_2400 = compute_overlap_area(pv_arr, buf2400, gsd)
+                    area_in_ring = compute_overlap_area(pv_arr, ring_buf, gsd)
+                    pv_area_m2 = area_in_2400 + area_in_ring
+                    # Re-encode polygon / mask for export
+                    polygon_b64 = encode_mask_as_polygon(masked_mask_img)
+                    # Ensure buffer used remains 2400 for reporting
+                    buffer_used_sqft = 2400
+        except Exception:
+            # Non-fatal; fall back to previous masked result if anything fails
+            pass
+
+        # If extremely low confidence, mark directly as solar absent (auto-accepted)
+        if confidence < 0.05:
+            # Enforce absent, zero area, and no mask in outputs
+            has_solar = False
+            pv_area_m2 = 0.0
+            buffer_used_sqft = buffer_used_sqft or 1200
+            masked_mask_img = Image.new("L", img.size, 0)
+            polygon_b64 = None
+            rec = format_output(
+                sample_id=sid,
+                lat=lat,
+                lon=lon,
+                has_solar=False,
+                confidence=confidence,
+                pv_area=pv_area_m2,
+                buffer_radius_sqft=buffer_used_sqft,
+                bbox_or_mask=polygon_b64,
+                img_source="GOOGLE_STATIC_MAPS",
+                capture_date="UNKNOWN",
+            )
+
+            overlay = _make_overlay(img, masked_mask_img, r1200, r2400, confidence, show_1200=show_1200, show_2400=show_2400)
+            needs_review = False
+            return rec, overlay, needs_review
 
         rec = format_output(
             sample_id=sid,
@@ -759,15 +1011,18 @@ def process_sample(row, mode: str = "Smart Review", api_key: Optional[str] = Non
             capture_date="UNKNOWN",
         )
 
-        overlay = _make_overlay(img, mask_img, r1200, r2400, confidence)
+        overlay = _make_overlay(img, masked_mask_img, r1200, r2400, confidence, show_1200=show_1200, show_2400=show_2400)
 
         qc = rec.get("qc_status", "REVIEW")
         if mode == "Review All":
+            # Flag all samples for human review
             needs_review = True
         elif mode == "Automatic":
-            needs_review = (qc != "VERIFIABLE")
-        else:
-            needs_review = (qc != "VERIFIABLE")
+            # Skip review entirely - go straight to download/results (trust automation)
+            needs_review = False
+        else:  # "Smart Review"
+            # Only keep images with confidence < 0.65 for manual review; skip images with higher confidence scores
+            needs_review = confidence < 0.65
 
         return rec, overlay, needs_review
 
@@ -888,7 +1143,7 @@ if selected == "Home":
         st.markdown("</div>", unsafe_allow_html=True)
 
     if st.session_state.in_workflow:
-        st.markdown("<div class='section-header'>Workflow</div>", unsafe_allow_html=True)
+        st.markdown("<div class='section-header'></div>", unsafe_allow_html=True)
         render_step_pills(st.session_state.workflow_step)
         st.write("")
 
@@ -947,16 +1202,20 @@ if selected == "Home":
             with cRun:
                 st.markdown("<div class='btn-primary'>", unsafe_allow_html=True)
                 if st.button("Run processing", key="runproc"):
-                    api_key = st.session_state.get("api_key")
-                    if not api_key and CRYPTO_OK:
-                        api_key = load_api_key_encrypted()
-                        if api_key:
-                            st.session_state.api_key = api_key
-
-                    if not api_key:
-                        st.error("No API key found. Save your API key in Settings (encrypted on device) or paste it into the field.")
+                    # Prevent running without an uploaded dataset
+                    if st.session_state.get("df") is None:
+                        st.error("Upload a data first (Home → Start new analysis → Upload).")
                     else:
-                        run_batch_process(st.session_state.df, mode)
+                        api_key = st.session_state.get("api_key")
+                        if not api_key and CRYPTO_OK:
+                            api_key = load_api_key_encrypted()
+                            if api_key:
+                                st.session_state.api_key = api_key
+
+                        if not api_key:
+                            st.error("No API key found. Save your API key in Settings (encrypted on device) or paste it into the field.")
+                        else:
+                            run_batch_process(st.session_state.df, mode)
                     safe_rerun()
                 st.markdown("</div>", unsafe_allow_html=True)
             with cBack:
