@@ -29,3 +29,5 @@ requests>=2.31.0
 
 # Environment (optional but useful)
 python-dotenv>=1.0.0
+
+segmentation-models-pytorch
