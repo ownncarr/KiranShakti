@@ -59,7 +59,8 @@ PY
 
 # Install the rest of requirements but skip torch and torchvision lines (avoids double install)
 RUN if [ -f requirements.txt ]; then \
-      python -m pip install --no-cache-dir -r requirements.txt; \
+      grep -vE "^\s*(torch|torchvision)\b" requirements.txt > /tmp/reqs_no_torch.txt || true; \
+      python -m pip install --no-cache-dir -r /tmp/reqs_no_torch.txt; \
     fi
 
 # Create a non-root user and fix permissions
