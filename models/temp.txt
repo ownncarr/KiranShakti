@@ -1,1 +1,2 @@
 
+go to "https://huggingface.co/OwnnCarr/pv_detector" for full repository
