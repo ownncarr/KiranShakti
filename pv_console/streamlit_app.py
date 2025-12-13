@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 import streamlit as st
 from streamlit_option_menu import option_menu
+import re
 
 # -------------------------
 # Optional dependencies
@@ -301,6 +302,10 @@ if "overlays" not in st.session_state:
     st.session_state.overlays = {}
 if "api_key" not in st.session_state:
     st.session_state.api_key = None
+if "upload_filename" not in st.session_state:
+    st.session_state.upload_filename = None
+if "processing_mode" not in st.session_state:
+    st.session_state.processing_mode = "Smart Review"
 
 # Load encrypted API on boot
 if CRYPTO_OK:
@@ -331,7 +336,7 @@ def fetch_satellite_image(lat: float, lon: float, api_key: str, zoom: int = 20, 
             "size": f"{size_px}x{size_px}",
             "maptype": "satellite",
             "key": api_key,
-            "scale": "2",
+            "scale": "1",
         }
         resp = requests.get(url, params=params, timeout=30)
         resp.raise_for_status()
@@ -359,7 +364,7 @@ os.makedirs(os.path.join(APP_DIR, "..", "models"), exist_ok=True)
 # -------------------------
 # PREPROCESSING CONSTANTS & METADATA (must match training exactly)
 # -------------------------
-MODEL_INPUT_SIZE = (512, 512)  # (width, height) — exact model input dimensions
+MODEL_INPUT_SIZE = (640, 640)  # (width, height) — exact model input dimensions
 TEMPERATURE = 1.5  # calibration scale for sigmoid
 INTERPOLATION = Image.LANCZOS  # Lanczos for high-quality resize (matches training)
 PAD_VALUE = (28, 28, 30)  # RGB padding color
@@ -699,9 +704,12 @@ def format_output(sample_id, lat, lon, has_solar, confidence, pv_area, buffer_ra
     }
 
 # buffer utils (merged)
-def compute_gsd_m_per_px(lat: float, zoom: int = 20) -> float:
+def compute_gsd_m_per_px(lat: float, zoom: int = 20, scale: int = 1) -> float:
     try:
-        return 156543.03392 * cos(lat * pi / 180) / (2 ** zoom)
+        # Google Static Maps 'scale' multiplies pixels per CSS size. When scale > 1,
+        # there are more physical pixels for the same map area, decreasing meters-per-pixel.
+        base = 156543.03392 * cos(lat * pi / 180) / (2 ** zoom)
+        return base / float(scale)
     except Exception:
         return 0.3
 
@@ -890,8 +898,9 @@ def process_sample(row, mode: str = "Smart Review", api_key: Optional[str] = Non
         img = fetch_satellite_image(lat, lon, api_key=api_key)
         W, H = img.size
 
-        # compute gsd & buffer radii
-        gsd = compute_gsd_m_per_px(lat)
+        # compute gsd & buffer radii. Note: fetch_satellite_image uses scale=1 by default.
+        # If you change the 'scale' arg in fetch_satellite_image, ensure to pass same scale here.
+        gsd = compute_gsd_m_per_px(lat, scale=1)
         r1200 = compute_buffer_radius_px(1200, gsd)
         r2400 = compute_buffer_radius_px(2400, gsd)
 
@@ -945,30 +954,32 @@ def process_sample(row, mode: str = "Smart Review", api_key: Optional[str] = Non
 
         # If the model predicts PV outside the 2400 sqft buffer, include an annulus just outside
         # the circle and merge any predicted pixels within that annulus into a single combined mask.
+        # Only extend predictions beyond the circle if PV has been found inside a buffer (has_solar == True).
         try:
-            outside_px = ((pv_arr == 255) & (buf2400 == 0)).sum()
-            if outside_px > 0:
-                # Expand search area by a margin (half the 2400 radius or at least 60px),
-                # and limit to image bounds.
-                margin_px = max(int(r2400 * 0.5), 60)
-                extended_radius = r2400 + margin_px
-                # create ring buffer = extended radius minus original 2400 radius
-                extended_buf = create_circular_buffer((H, W), extended_radius)
-                ring_buf = ((extended_buf == 1) & (buf2400 == 0)).astype(np.uint8)
-                # Check whether predicted PV exists inside that ring
-                ring_px = ((pv_arr == 255) & (ring_buf == 1)).sum()
-                if ring_px > 0:
-                    # Merge predicted pixels inside 2400 and ring into final mask
-                    combined_arr = ((pv_arr == 255) & ((buf2400 == 1) | (ring_buf == 1))).astype(np.uint8) * 255
-                    masked_mask_img = Image.fromarray(combined_arr.astype(np.uint8))
-                    # Recompute area: area_in_2400 + area_in_ring
-                    area_in_2400 = compute_overlap_area(pv_arr, buf2400, gsd)
-                    area_in_ring = compute_overlap_area(pv_arr, ring_buf, gsd)
-                    pv_area_m2 = area_in_2400 + area_in_ring
-                    # Re-encode polygon / mask for export
-                    polygon_b64 = encode_mask_as_polygon(masked_mask_img)
-                    # Ensure buffer used remains 2400 for reporting
-                    buffer_used_sqft = 2400
+            if has_solar:
+                outside_px = ((pv_arr == 255) & (buf2400 == 0)).sum()
+                if outside_px > 0:
+                    # Expand search area by a margin (half the 2400 radius or at least 60px),
+                    # and limit to image bounds.
+                    margin_px = max(int(r2400 * 0.5), 60)
+                    extended_radius = r2400 + margin_px
+                    # create ring buffer = extended radius minus original 2400 radius
+                    extended_buf = create_circular_buffer((H, W), extended_radius)
+                    ring_buf = ((extended_buf == 1) & (buf2400 == 0)).astype(np.uint8)
+                    # Check whether predicted PV exists inside that ring
+                    ring_px = ((pv_arr == 255) & (ring_buf == 1)).sum()
+                    if ring_px > 0:
+                        # Merge predicted pixels inside 2400 and ring into final mask
+                        combined_arr = ((pv_arr == 255) & ((buf2400 == 1) | (ring_buf == 1))).astype(np.uint8) * 255
+                        masked_mask_img = Image.fromarray(combined_arr.astype(np.uint8))
+                        # Recompute area: area_in_2400 + area_in_ring
+                        area_in_2400 = compute_overlap_area(pv_arr, buf2400, gsd)
+                        area_in_ring = compute_overlap_area(pv_arr, ring_buf, gsd)
+                        pv_area_m2 = area_in_2400 + area_in_ring
+                        # Re-encode polygon / mask for export
+                        polygon_b64 = encode_mask_as_polygon(masked_mask_img)
+                        # Ensure buffer used remains 2400 for reporting
+                        buffer_used_sqft = 2400
         except Exception:
             # Non-fatal; fall back to previous masked result if anything fails
             pass
@@ -1049,6 +1060,7 @@ def render_step_pills(current):
     st.markdown("".join(html_parts), unsafe_allow_html=True)
 
 def run_batch_process(df, mode="Smart Review"):
+    st.session_state.processing_mode = mode
     st.session_state.results = []
     st.session_state.review_queue = []
     st.session_state.overlays = {}
@@ -1118,6 +1130,16 @@ def run_batch_process(df, mode="Smart Review"):
     status.text("Processing complete.")
 
 # -------------------------
+
+# Filename sanitizer
+def _sanitize_filename(name: Optional[str]) -> str:
+    if not name:
+        return "pv_dataset"
+    base = os.path.splitext(name)[0]
+    s = re.sub(r"[^A-Za-z0-9_\-\.]+", "_", base.strip())
+    return s[:150] if s else "pv_dataset"
+
+# -------------------------
 # Main UI pages (Home / Settings / How to use)
 if selected == "Home":
     st.markdown("<div class='section-header'>Rooftop PV Detection</div>", unsafe_allow_html=True)
@@ -1169,6 +1191,10 @@ if selected == "Home":
                         df["sample_id"] = df["sample_id"].apply(_normalize_sid)
                         st.success(f"{len(df)} samples loaded.")
                         st.session_state.df = df
+                        try:
+                            st.session_state.upload_filename = getattr(up, "name", None) or None
+                        except Exception:
+                            st.session_state.upload_filename = None
                     else:
                         st.error("File must contain columns: sample_id, lat, lon")
                 except Exception as e:
@@ -1197,6 +1223,7 @@ if selected == "Home":
             st.markdown("<div class='card'>", unsafe_allow_html=True)
             st.markdown("**Step 2 — Process (inference & QC)**")
             mode = st.selectbox("Processing mode", ["Automatic", "Smart Review", "Review All"], index=1)
+            st.session_state.processing_mode = mode
 
             cRun, cBack = st.columns(2)
             with cRun:
@@ -1321,7 +1348,12 @@ if selected == "Home":
                         if img_bytes:
                             z.writestr(f"overlays/{sid}.png", img_bytes)
                 mem.seek(0)
-                st.download_button("Download ZIP", data=mem, file_name="pv_results.zip")
+                upload_name = st.session_state.get("upload_filename") or ""
+                mode_name = st.session_state.get("processing_mode") or "Smart Review"
+                name_part = _sanitize_filename(upload_name) if upload_name else "pv_dataset"
+                mode_part = mode_name.replace(" ", "_")
+                zip_filename = f"{name_part}_{mode_part}_results.zip"
+                st.download_button("Download ZIP", data=mem, file_name=zip_filename)
 
             cCLOSE, cNEW = st.columns(2)
             with cCLOSE:
